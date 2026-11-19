@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('bundled_bins', 'bundled_bins')]
+datas = [('assets', 'assets'), ('adb_keys', 'adb_keys'), ('bundled_bins', 'bundled_bins')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('customtkinter')

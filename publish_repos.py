@@ -19,8 +19,8 @@ import requests
 
 STUDIO_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_NAME = "Android-Scrcpy-DeX-Studio"
-TAG_NAME = "v3.0.0"
-RELEASE_TITLE = "J.A.R.V.I.S. Android & Scrcpy DeX Studio v3.0.0 — Flagship Obsidian Glass Edition"
+TAG_NAME = "v3.1.0"
+RELEASE_TITLE = "J.A.R.V.I.S. Android & Scrcpy DeX Studio v3.1.0 — Autonomous Multi-Machine Auto-Authorization Edition"
 RELEASE_NOTES = """## ⚡ J.A.R.V.I.S. Android & Scrcpy DeX Studio v3.0.0 (Flagship Obsidian Glass Edition)
 
 Cross-platform (**Windows 11** & **CachyOS / Arch / Debian / Ubuntu Linux**) workstation for Android ADB device control, Live System Task Manager, Multi-APK Batch Installation, Scrcpy 4.0 Mirroring with a **Magnetic Android Emulator Side-Toolbar**, and **PC as Samsung DeX / Android Desktop Workstation Mode**.
@@ -270,8 +270,8 @@ if __name__ == "__main__":
     release_assets = [
         os.path.join(STUDIO_DIR, "dist", "AndroidScrcpyDeXStudio-Setup-v2.0.exe"),
         os.path.join(STUDIO_DIR, "dist", "AndroidScrcpyDeXStudio.exe"),
-        os.path.join(STUDIO_DIR, "linux-packages", "debian", "android-scrcpy-dex-studio_3.0.0_all.deb"),
-        os.path.join(STUDIO_DIR, "linux-packages", "aur", "android-scrcpy-dex-studio-3.0.0.tar.gz"),
+        os.path.join(STUDIO_DIR, "linux-packages", "debian", "android-scrcpy-dex-studio_3.1.0_all.deb"),
+        os.path.join(STUDIO_DIR, "linux-packages", "aur", "android-scrcpy-dex-studio-3.1.0.tar.gz"),
         os.path.join(STUDIO_DIR, "linux-packages", "aur", "PKGBUILD"),
     ]
     fg_url = publish_forgejo(release_assets)

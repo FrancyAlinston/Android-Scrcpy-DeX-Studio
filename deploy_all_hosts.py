@@ -64,18 +64,23 @@ def deploy_asus_doomsday() -> None:
     client.exec_command(f"rm -rf {remote_build_dir} && mkdir -p {remote_build_dir}")[1].read()
 
     local_aur_dir = os.path.join(STUDIO_DIR, "linux-packages", "aur")
-    for fname in ["PKGBUILD", ".SRCINFO", "android-scrcpy-dex-studio-3.0.0.tar.gz", "install_aur.sh"]:
+    for fname in ["PKGBUILD", ".SRCINFO", "android-scrcpy-dex-studio-3.1.0.tar.gz", "install_aur.sh"]:
         lpath = os.path.join(local_aur_dir, fname)
         if os.path.isfile(lpath):
             sftp.put(lpath, f"{remote_build_dir}/{fname}")
 
     # Also sync to ~/Documents/Projects/iRipper/Mobile Engineering Studio/adb-scrcpy-studio on DOOMSDAY
     remote_proj_dir = "/home/dsilva/Documents/Projects/iRipper/Mobile Engineering Studio/adb-scrcpy-studio"
-    client.exec_command(f"mkdir -p '{remote_proj_dir}/assets' '{remote_proj_dir}/linux-packages/aur'")[1].read()
+    client.exec_command(f"mkdir -p '{remote_proj_dir}/assets' '{remote_proj_dir}/adb_keys' '{remote_proj_dir}/linux-packages/aur' '~/.android'")[1].read()
     sftp.put(os.path.join(STUDIO_DIR, "adb_scrcpy_studio.py"), f"{remote_proj_dir}/adb_scrcpy_studio.py")
     sftp.put(os.path.join(STUDIO_DIR, "assets", "android_scrcpy_dex.png"), f"{remote_proj_dir}/assets/android_scrcpy_dex.png")
     sftp.put(os.path.join(STUDIO_DIR, "assets", "android_scrcpy_dex.ico"), f"{remote_proj_dir}/assets/android_scrcpy_dex.ico")
-    for fname in ["PKGBUILD", ".SRCINFO", "android-scrcpy-dex-studio-3.0.0.tar.gz", "install_aur.sh"]:
+    for kname in ["iripper_adbkey", "iripper_adbkey.pub", "doomsday_adbkey", "doomsday_adbkey.pub"]:
+        kpath = os.path.join(STUDIO_DIR, "adb_keys", kname)
+        if os.path.isfile(kpath):
+            sftp.put(kpath, f"{remote_proj_dir}/adb_keys/{kname}")
+            sftp.put(kpath, f"/home/dsilva/.android/{kname}")
+    for fname in ["PKGBUILD", ".SRCINFO", "android-scrcpy-dex-studio-3.1.0.tar.gz", "install_aur.sh"]:
         lpath = os.path.join(local_aur_dir, fname)
         if os.path.isfile(lpath):
             sftp.put(lpath, f"{remote_proj_dir}/linux-packages/aur/{fname}")
@@ -84,9 +89,10 @@ def deploy_asus_doomsday() -> None:
     # 3. Install dependencies (scrcpy, android-tools, tk, xdotool, python-psutil, python-pillow) & build/install AUR package
     client.close()
     install_cmd = (
+        f"chmod 600 ~/.android/*adbkey 2>/dev/null || true && "
         f"echo '{pwd}' | sudo -S pacman -S --needed --noconfirm android-tools scrcpy tk xdotool python-psutil python-pillow python-pip && "
         f"cd {remote_build_dir} && makepkg -f && "
-        f"echo '{pwd}' | sudo -S pacman -U --noconfirm {remote_build_dir}/android-scrcpy-dex-studio-3.0.0-1-any.pkg.tar* && "
+        f"echo '{pwd}' | sudo -S pacman -U --noconfirm {remote_build_dir}/android-scrcpy-dex-studio-3.1.0-1-any.pkg.tar* && "
         f"mkdir -p ~/.local/share/android-scrcpy-dex-studio && "
         f"if [ ! -x ~/.local/share/android-scrcpy-dex-studio/venv/bin/python ]; then "
         f"  python3 -m venv ~/.local/share/android-scrcpy-dex-studio/venv && "
@@ -106,7 +112,7 @@ def deploy_asus_doomsday() -> None:
     if res.returncode != 0:
         print("[STDERR]", res.stderr)
     else:
-        print("[+] Successfully installed android-scrcpy-dex-studio v3.0.0 on ASUS Laptop (DOOMSDAY)!")
+        print("[+] Successfully installed android-scrcpy-dex-studio v3.1.0 on ASUS Laptop (DOOMSDAY)!")
 
 
 if __name__ == "__main__":

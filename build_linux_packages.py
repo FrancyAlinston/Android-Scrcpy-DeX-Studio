@@ -14,7 +14,7 @@ import hashlib
 
 
 APP_NAME = "android-scrcpy-dex-studio"
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 MAINTAINER = "Francy Alinston (Alen) <alen@jarvis.local>"
 DESCRIPTION = (
     "J.A.R.V.I.S. Android & Scrcpy DeX Studio - ADB Control, Live Task Manager, Scrcpy 4.0 Mirror & PC DeX Mode\n"

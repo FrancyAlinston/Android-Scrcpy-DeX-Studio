@@ -89,7 +89,7 @@ if (!(Test-Path $regKey)) {
 $sizeKb = [int]((Get-ChildItem -Path $installDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1KB)
 
 Set-ItemProperty -Path $regKey -Name "DisplayName" -Value "J.A.R.V.I.S. Android & Scrcpy DeX Studio"
-Set-ItemProperty -Path $regKey -Name "DisplayVersion" -Value "3.0.0"
+Set-ItemProperty -Path $regKey -Name "DisplayVersion" -Value "3.1.0"
 Set-ItemProperty -Path $regKey -Name "Publisher" -Value "J.A.R.V.I.S. Mobile Engineering Studio"
 Set-ItemProperty -Path $regKey -Name "DisplayIcon" -Value "$iconPath,0"
 Set-ItemProperty -Path $regKey -Name "InstallLocation" -Value $installDir

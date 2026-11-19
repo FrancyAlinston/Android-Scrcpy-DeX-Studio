@@ -48,7 +48,7 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 
 # Obsidian Glass Design System Palette
 C_VOID = "#06080d"
@@ -769,11 +769,48 @@ class BatchApkInstallModal(ctk.CTkToplevel):
 
 
 class AdbController:
-    """Thread-safe controller for executing hidden ADB and Scrcpy operations."""
+    """Thread-safe controller for executing hidden ADB, Scrcpy, and Autonomous Multi-Key Device Authorization."""
 
     def __init__(self) -> None:
         self.adb_path = ADB_BIN
         self.scrcpy_path = SCRCPY_BIN
+        self.synced_devices: set[str] = set()
+        self.last_reconnect_ts: float = 0.0
+        self._init_multi_machine_adb_keys()
+
+    def _init_multi_machine_adb_keys(self) -> None:
+        """
+        Install bundled Workstation + DOOMSDAY ADB RSA keypairs into ~/.android and configure ADB_VENDOR_KEYS
+        so any phone previously authorized on either machine automatically authorizes without a prompt.
+        """
+        try:
+            android_dir = os.path.join(os.path.expanduser("~"), ".android")
+            os.makedirs(android_dir, exist_ok=True)
+            bundle_keys_dir = os.path.join(get_bundle_dir(), "adb_keys")
+            if os.path.isdir(bundle_keys_dir):
+                for fname in os.listdir(bundle_keys_dir):
+                    src = os.path.join(bundle_keys_dir, fname)
+                    dst = os.path.join(android_dir, fname)
+                    if os.path.isfile(src) and not os.path.isfile(dst):
+                        shutil.copy2(src, dst)
+                        if os.name != "nt" and not fname.endswith(".pub"):
+                            try:
+                                os.chmod(dst, 0o600)
+                            except Exception:
+                                pass
+
+            key_files: List[str] = []
+            for fname in os.listdir(android_dir):
+                if fname.endswith("adbkey") and not fname.endswith(".pub"):
+                    full_k = os.path.join(android_dir, fname)
+                    if os.path.isfile(full_k):
+                        key_files.append(full_k)
+
+            if key_files:
+                sep = ";" if os.name == "nt" else ":"
+                os.environ["ADB_VENDOR_KEYS"] = sep.join(key_files)
+        except Exception:
+            pass
 
     def run_adb(self, args: List[str], serial: Optional[str] = None, timeout: float = 8.0) -> Tuple[int, str, str]:
         cmd = [self.adb_path]
@@ -781,8 +818,10 @@ class AdbController:
             cmd.extend(["-s", serial])
         cmd.extend(args)
         try:
+            env = os.environ.copy()
             proc = subprocess.run(
                 cmd,
+                env=env,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -796,11 +835,58 @@ class AdbController:
         except Exception as exc:
             return -1, "", str(exc)
 
-    def list_devices(self) -> List[Dict[str, str]]:
+    def force_reconnect_unauthorized(self, serial: Optional[str] = None) -> str:
+        """
+        Actively dispatch ADB RSA handshake and reconnect offline/unauthorized transports
+        so the connected phone immediately pops up or accepts the RSA key authorization.
+        """
+        self._init_multi_machine_adb_keys()
+        self.run_adb(["reconnect", "offline"], timeout=4.0)
+        if serial:
+            self.run_adb(["-s", serial, "reconnect"], timeout=4.0)
+        else:
+            self.run_adb(["reconnect"], timeout=4.0)
+        self.last_reconnect_ts = time.time()
+        return "Dispatched RSA key handshake & ADB reconnect to all connected devices."
+
+    def sync_trusted_pubkeys_to_device(self, serial: str) -> None:
+        """
+        Once a device is authorized ('device' state), attempt to append all bundled public keys
+        (Workstation + ASUS DOOMSDAY) to /data/misc/adb/adb_keys (if root/su is available)
+        so the phone is permanently pre-authorized across every PC/Laptop in the fleet.
+        """
+        if serial in self.synced_devices:
+            return
+        self.synced_devices.add(serial)
+        try:
+            android_dir = os.path.join(os.path.expanduser("~"), ".android")
+            pub_keys: List[str] = []
+            if os.path.isdir(android_dir):
+                for fname in os.listdir(android_dir):
+                    if fname.endswith(".pub"):
+                        with open(os.path.join(android_dir, fname), "r", encoding="utf-8", errors="ignore") as f:
+                            k = f.read().strip()
+                            if k:
+                                pub_keys.append(k)
+            if not pub_keys:
+                return
+            joined = "\\n".join(pub_keys)
+            cmd = (
+                f"su -c 'mkdir -p /data/misc/adb && "
+                f"printf \"{joined}\\n\" >> /data/misc/adb/adb_keys && "
+                f"sort -u /data/misc/adb/adb_keys -o /data/misc/adb/adb_keys && "
+                f"chmod 0640 /data/misc/adb/adb_keys' 2>/dev/null || true"
+            )
+            self.run_adb(["shell", cmd], serial=serial, timeout=4.0)
+        except Exception:
+            pass
+
+    def list_devices(self, auto_heal: bool = True) -> List[Dict[str, str]]:
         code, out, _ = self.run_adb(["devices", "-l"], timeout=5.0)
         devices: List[Dict[str, str]] = []
         if code != 0 or not out:
             return devices
+        has_unauth = False
         for line in out.splitlines()[1:]:
             line = line.strip()
             if not line or line.startswith("*"):
@@ -814,6 +900,10 @@ class AdbController:
                     if ":" in token:
                         k, v = token.split(":", 1)
                         meta[k] = v
+                if state in ("unauthorized", "offline"):
+                    has_unauth = True
+                elif state == "device":
+                    threading.Thread(target=self.sync_trusted_pubkeys_to_device, args=(serial,), daemon=True).start()
                 devices.append(
                     {
                         "serial": serial,
@@ -823,6 +913,15 @@ class AdbController:
                         "transport_id": meta.get("transport_id", ""),
                     }
                 )
+
+        # Auto-trigger RSA handshake retry every 6s if any connected device is unauthorized/offline
+        if auto_heal and has_unauth and (time.time() - self.last_reconnect_ts > 6.0):
+            self.last_reconnect_ts = time.time()
+            self.run_adb(["reconnect", "offline"], timeout=3.0)
+            for d in devices:
+                if d["state"] in ("unauthorized", "offline"):
+                    self.run_adb(["-s", d["serial"], "reconnect"], timeout=3.0)
+
         return devices
 
     def send_keyevent(self, serial: str, keycode: str) -> bool:
@@ -1096,9 +1195,11 @@ class AdbScrcpyStudioApp(ctk.CTk):
         self.adb = AdbController()
         self.monitor = SystemMonitorEngine(self.adb)
         self.current_serial: Optional[str] = None
+        self.current_state: str = "disconnected"
         self.devices_cache: List[Dict[str, str]] = []
         self.packages_cache: List[str] = []
         self.last_device_info: Dict[str, str] = {}
+        self._last_bus_sig: str = ""
 
         # Managed child processes & magnetic emulator side-toolbar
         self.scrcpy_mirror_proc: Optional[subprocess.Popen] = None
@@ -1129,10 +1230,11 @@ class AdbScrcpyStudioApp(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Initial device discovery & 60fps animation loop
+        # Initial device discovery, autonomous authorization watchdog & 60fps animation loop
         self.refresh_devices()
         self.after(30, self._animation_tick_60fps)
         self.after(1500, self._periodic_table_sync)
+        self.after(2500, self._auto_bus_auth_watchdog_loop)
 
     def _configure_treeview_style(self) -> None:
         style = ttk.Style()
@@ -1369,12 +1471,12 @@ class AdbScrcpyStudioApp(ctk.CTk):
         )
         self.view_title_lbl.pack(side="left", padx=(18, 12), pady=14)
 
-        # Right side: Device selector + Scan + Quick Launch buttons
+        # Right side: Device selector + Scan + Re-Trigger Auth buttons
         self.refresh_dev_btn = ctk.CTkButton(
             self.top_bar,
             text="Scan USB / LAN",
             image=self.icons.get("refresh", 17, (56, 189, 248, 255)),
-            width=135,
+            width=130,
             height=36,
             corner_radius=10,
             fg_color=C_SURFACE,
@@ -1384,13 +1486,27 @@ class AdbScrcpyStudioApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self.refresh_devices,
         )
-        self.refresh_dev_btn.pack(side="right", padx=(6, 16), pady=12)
+        self.refresh_dev_btn.pack(side="right", padx=(4, 16), pady=12)
+
+        self.reauth_btn = ctk.CTkButton(
+            self.top_bar,
+            text="Auto-Auth",
+            image=self.icons.get("bolt", 16, (255, 255, 255, 255)),
+            width=108,
+            height=36,
+            corner_radius=10,
+            fg_color=C_AMBER,
+            hover_color=C_AMBER_HOV,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._manual_retrigger_auth,
+        )
+        self.reauth_btn.pack(side="right", padx=4, pady=12)
 
         self.device_combo = ctk.CTkOptionMenu(
             self.top_bar,
             values=["Scanning..."],
             command=self._on_device_selected,
-            width=275,
+            width=265,
             height=36,
             corner_radius=10,
             fg_color=C_SURFACE,
@@ -1466,8 +1582,12 @@ class AdbScrcpyStudioApp(ctk.CTk):
         # Breathing Status LED in Sidebar
         self.led_canvas.delete("all")
         pulse = (math.sin(self.anim_phase) + 1.0) * 0.5
-        base_col = C_EMERALD if self.current_serial else C_CRIMSON
-        halo_col = "#064e3b" if self.current_serial else "#4c0519"
+        if not self.current_serial:
+            base_col, halo_col = C_CRIMSON, "#4c0519"
+        elif self.current_state in ("unauthorized", "offline"):
+            base_col, halo_col = C_AMBER, "#451a03"
+        else:
+            base_col, halo_col = C_EMERALD, "#064e3b"
         r_outer = 6 + pulse * 3.5
         self.led_canvas.create_oval(11 - r_outer, 11 - r_outer, 11 + r_outer, 11 + r_outer, fill=halo_col, outline="")
         self.led_canvas.create_oval(7, 7, 15, 15, fill=base_col, outline="#ffffff", width=1)
@@ -1483,7 +1603,7 @@ class AdbScrcpyStudioApp(ctk.CTk):
         self.disp_temp += (self.target_temp - self.disp_temp) * 0.2
 
         # Update Sidebar Mini Telemetry Summary
-        if self.current_serial:
+        if self.current_serial and self.current_state == "device":
             ver = self.last_device_info.get("Android Version", "--")
             self.lbl_side_specs.configure(
                 text=f"Android {ver}  •  Battery {bat_lvl}%\nCPU: {self.disp_cpu:.1f}%  •  RAM: {self.disp_ram:.1f}%"
@@ -2464,11 +2584,43 @@ class AdbScrcpyStudioApp(ctk.CTk):
         self.status_label.configure(text=msg, text_color=color)
 
     # =========================================================================
-    # DEVICE DISCOVERY & WIRELESS ADB
+    # DEVICE DISCOVERY, AUTONOMOUS AUTHORIZATION & WIRELESS ADB
     # =========================================================================
+    def _auto_bus_auth_watchdog_loop(self) -> None:
+        """
+        Continuously monitor the USB/LAN ADB bus every 2.5 seconds.
+        - Automatically detects newly plugged devices without manual clicking.
+        - If any connected device is 'unauthorized' or 'offline', automatically dispatches
+          RSA handshake retries (`adb reconnect offline` / `adb -s <serial> reconnect`).
+        - Immediately refreshes UI telemetry the instant you tap 'Allow' on the phone screen!
+        """
+        def worker() -> None:
+            devs = self.adb.list_devices(auto_heal=True)
+            sig = "|".join(f"{d['serial']}:{d['state']}:{d['model']}" for d in devs)
+            if sig != self._last_bus_sig:
+                self._last_bus_sig = sig
+                self.after(0, lambda: self._update_device_dropdown(devs))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(2500, self._auto_bus_auth_watchdog_loop)
+
+    def _manual_retrigger_auth(self) -> None:
+        self.set_status("Dispatching Multi-Key RSA Handshake & ADB Reconnect to all devices...", C_AMBER)
+
+        def worker() -> None:
+            msg = self.adb.force_reconnect_unauthorized(self.current_serial)
+            time.sleep(1.0)
+            devs = self.adb.list_devices(auto_heal=False)
+            self._last_bus_sig = "|".join(f"{d['serial']}:{d['state']}:{d['model']}" for d in devs)
+            self.after(0, lambda: self._update_device_dropdown(devs))
+            self.after(0, lambda: self.set_status(f"{msg} Check phone screen to tap 'Allow'!", C_AMBER))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def refresh_devices(self) -> None:
         def worker() -> None:
-            devs = self.adb.list_devices()
+            devs = self.adb.list_devices(auto_heal=True)
+            self._last_bus_sig = "|".join(f"{d['serial']}:{d['state']}:{d['model']}" for d in devs)
             self.after(0, lambda: self._update_device_dropdown(devs))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2479,27 +2631,54 @@ class AdbScrcpyStudioApp(ctk.CTk):
             self.device_combo.configure(values=["No ADB Devices Connected"])
             self.device_combo.set("No ADB Devices Connected")
             self.current_serial = None
+            self.current_state = "disconnected"
             self.monitor.active_serial = None
             self.lbl_side_status.configure(text="DISCONNECTED", text_color=C_CRIMSON)
             self.lbl_side_model.configure(text="No Device Found")
             self.set_status("No active ADB devices found. Connect via USB or Wi-Fi ADB.", C_CRIMSON)
             return
 
+        # Sort so authorized ('device') phones appear first, or keep currently selected serial if still present
         labels = [f"{d['serial']} ({d['model']} - {d['state']})" for d in devs]
         self.device_combo.configure(values=labels)
-        self.device_combo.set(labels[0])
-        self._on_device_selected(labels[0])
+
+        chosen_label = labels[0]
+        if self.current_serial:
+            for lbl in labels:
+                if lbl.startswith(f"{self.current_serial} "):
+                    chosen_label = lbl
+                    break
+        self.device_combo.set(chosen_label)
+        self._on_device_selected(chosen_label)
 
     def _on_device_selected(self, selection: str) -> None:
         if not self.devices_cache or selection == "No ADB Devices Connected":
             return
         serial = selection.split()[0].strip()
         self.current_serial = serial
+
+        dev_meta = next((d for d in self.devices_cache if d["serial"] == serial), None)
+        state = dev_meta["state"] if dev_meta else "device"
+        self.current_state = state
+
+        if state in ("unauthorized", "offline"):
+            self.monitor.active_serial = None
+            self.lbl_side_status.configure(text="AWAITING PHONE AUTH...", text_color=C_AMBER)
+            self.lbl_side_model.configure(text=f"{serial} ({state})")
+            self.lbl_side_specs.configure(
+                text="📲 Auto-sent RSA Key Popup!\nUnlock phone & tap 'Allow'\n(Check 'Always allow')"
+            )
+            self.set_status(
+                f"⚡ Auto-Authorizing {serial}: RSA key handshake sent! Unlock phone screen and tap 'Allow USB debugging'.",
+                C_AMBER,
+            )
+            return
+
         self.monitor.active_serial = serial
         model_name = selection.split("(")[1].split("-")[0].strip() if "(" in selection else serial
-        self.lbl_side_status.configure(text="ONLINE • USB/LAN", text_color=C_EMERALD)
+        self.lbl_side_status.configure(text="ONLINE • AUTHORIZED", text_color=C_EMERALD)
         self.lbl_side_model.configure(text=model_name.replace("_", " "))
-        self.set_status(f"Connected Target Device: {selection}", C_EMERALD)
+        self.set_status(f"Connected & Authorized Target Device: {selection}", C_EMERALD)
         self.refresh_device_info()
         self.refresh_packages_list()
 
