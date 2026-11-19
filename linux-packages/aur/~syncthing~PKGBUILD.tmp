@@ -1,0 +1,23 @@
+# Maintainer: Francy Alinston (Alen) <alen@jarvis.local>
+pkgname=android-scrcpy-dex-studio
+pkgver=2.2.0
+pkgrel=1
+pkgdesc="J.A.R.V.I.S. Android & Scrcpy DeX Studio - ADB Control, Live Task Manager, Scrcpy 4.0 Mirror & PC DeX Workstation"
+arch=('any')
+url="https://github.com/Genymobile/scrcpy"
+license=('MIT')
+depends=('python' 'tk' 'python-psutil' 'python-pillow' 'python-pip' 'android-tools' 'scrcpy')
+optdepends=('python-customtkinter: system-wide CustomTkinter library')
+source=("android-scrcpy-dex-studio-2.2.0.tar.gz")
+sha256sums=('bf3e116b6a7724ed4c738c647af1d771cca4fe848ee3a8001987bed73ee2b518')
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    install -dm755 "$pkgdir/opt/$pkgname/assets"
+    install -Dm755 "adb_scrcpy_studio.py" "$pkgdir/opt/$pkgname/adb_scrcpy_studio.py"
+    install -Dm644 "assets/android_scrcpy_dex.png" "$pkgdir/opt/$pkgname/assets/android_scrcpy_dex.png"
+    install -Dm644 "assets/android_scrcpy_dex.ico" "$pkgdir/opt/$pkgname/assets/android_scrcpy_dex.ico"
+    install -Dm755 "android-scrcpy-dex-studio.sh" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 "android-scrcpy-dex-studio.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+    install -Dm644 "assets/android_scrcpy_dex.png" "$pkgdir/usr/share/pixmaps/$pkgname.png"
+}

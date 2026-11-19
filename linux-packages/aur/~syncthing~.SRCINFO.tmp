@@ -1,0 +1,19 @@
+pkgbase = android-scrcpy-dex-studio
+	pkgdesc = J.A.R.V.I.S. Android & Scrcpy DeX Studio - ADB Control, Live Task Manager, Scrcpy 4.0 Mirror & PC DeX Workstation
+	pkgver = 2.2.0
+	pkgrel = 1
+	url = https://github.com/Genymobile/scrcpy
+	arch = any
+	license = MIT
+	depends = python
+	depends = tk
+	depends = python-psutil
+	depends = python-pillow
+	depends = python-pip
+	depends = android-tools
+	depends = scrcpy
+	optdepends = python-customtkinter: system-wide CustomTkinter library
+	source = android-scrcpy-dex-studio-2.2.0.tar.gz
+	sha256sums = bf3e116b6a7724ed4c738c647af1d771cca4fe848ee3a8001987bed73ee2b518
+
+pkgname = android-scrcpy-dex-studio

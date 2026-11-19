@@ -1,0 +1,11 @@
+# PyInstaller build / payload artifacts (uploaded to GitHub & Forgejo Releases)
+build/
+dist/
+payload/
+bundled_bins/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+screenshots/
