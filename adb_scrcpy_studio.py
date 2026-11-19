@@ -94,14 +94,30 @@ def get_subprocess_kwargs() -> Dict[str, Any]:
 
 
 def resolve_binary(bin_name: str, win_fallbacks: List[str], linux_fallbacks: List[str]) -> str:
-    """Resolve binary executable path prioritizing embedded self-contained bundle first."""
+    """
+    Resolve binary executable path:
+    - For `adb`, prefer system-installed Platform Tools first so the GUI shares the exact same ADB server
+      version (e.g. 37.0.1) as the user's terminal without killing/restarting the daemon; fall back to
+      the self-contained bundled_bins/adb.exe on machines without Platform Tools installed.
+    - For `scrcpy`, prefer the self-contained bundled_bins/scrcpy.exe v4.0 first.
+    """
     bundle_root = get_bundle_dir()
     exe_ext = ".exe" if os.name == "nt" else ""
     bundled_candidate = os.path.join(bundle_root, "bundled_bins", f"{bin_name}{exe_ext}")
+    local_candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bundled_bins", f"{bin_name}{exe_ext}")
+
+    if bin_name == "adb":
+        found = shutil.which(bin_name)
+        if found:
+            return found
+        candidates = win_fallbacks if os.name == "nt" else linux_fallbacks
+        for path in candidates:
+            expanded = os.path.expandvars(os.path.expanduser(path))
+            if os.path.isfile(expanded):
+                return expanded
+
     if os.path.isfile(bundled_candidate):
         return bundled_candidate
-
-    local_candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bundled_bins", f"{bin_name}{exe_ext}")
     if os.path.isfile(local_candidate):
         return local_candidate
 
@@ -775,6 +791,7 @@ class AdbController:
         self.adb_path = ADB_BIN
         self.scrcpy_path = SCRCPY_BIN
         self.synced_devices: set[str] = set()
+        self.prompted_unauth_serials: set[str] = set()
         self.last_reconnect_ts: float = 0.0
         self._init_multi_machine_adb_keys()
 
@@ -914,13 +931,44 @@ class AdbController:
                     }
                 )
 
-        # Auto-trigger RSA handshake retry every 6s if any connected device is unauthorized/offline
-        if auto_heal and has_unauth and (time.time() - self.last_reconnect_ts > 6.0):
-            self.last_reconnect_ts = time.time()
-            self.run_adb(["reconnect", "offline"], timeout=3.0)
-            for d in devices:
-                if d["state"] in ("unauthorized", "offline"):
-                    self.run_adb(["-s", d["serial"], "reconnect"], timeout=3.0)
+        # Trigger `adb reconnect offline` ONCE per newly plugged unauthorized/offline serial so we pop up
+        # the RSA dialog on the phone without ever resetting the USB transport while the user taps "Allow"
+        if auto_heal and has_unauth:
+            current_serials = {d["serial"] for d in devices}
+            self.prompted_unauth_serials.intersection_update(current_serials)
+            unprompted = [
+                d["serial"]
+                for d in devices
+                if d["state"] in ("unauthorized", "offline") and d["serial"] not in self.prompted_unauth_serials
+            ]
+            if unprompted:
+                for s in unprompted:
+                    self.prompted_unauth_serials.add(s)
+                self.last_reconnect_ts = time.time()
+                self.run_adb(["reconnect", "offline"], timeout=3.0)
+                time.sleep(0.9)
+                # Re-query device list immediately after the 0.9s USB re-enumeration so the dropdown never flickers empty
+                code2, out2, _ = self.run_adb(["devices", "-l"], timeout=5.0)
+                if code2 == 0 and out2:
+                    refreshed: List[Dict[str, str]] = []
+                    for line in out2.splitlines()[1:]:
+                        line = line.strip()
+                        if not line or line.startswith("*"):
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            meta = {t.split(":", 1)[0]: t.split(":", 1)[1] for t in parts[2:] if ":" in t}
+                            refreshed.append(
+                                {
+                                    "serial": parts[0],
+                                    "state": parts[1],
+                                    "model": meta.get("model", "Unknown"),
+                                    "device": meta.get("device", "Unknown"),
+                                    "transport_id": meta.get("transport_id", ""),
+                                }
+                            )
+                    if refreshed:
+                        return refreshed
 
         return devices
 
