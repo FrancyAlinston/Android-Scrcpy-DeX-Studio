@@ -9,7 +9,7 @@ license=('MIT')
 depends=('python' 'tk' 'python-psutil' 'python-pillow' 'python-pip' 'android-tools' 'scrcpy')
 optdepends=('python-customtkinter: system-wide CustomTkinter library')
 source=("android-scrcpy-dex-studio-3.1.0.tar.gz")
-sha256sums=('2e305a2f6eafcf29f117e36f2945d6d3e9fce5367398f45e9ede6da9b12eef3a')
+sha256sums=('fe073a64d0bd0bb3cd6be2a323f61c6d6fd40988f34b87651a40dd483ec880e6')
 
 package() {
     cd "$srcdir/$pkgname-$pkgver"

@@ -32,6 +32,7 @@ import time
 import json
 import ctypes
 import shutil
+import tempfile
 import threading
 import subprocess
 from collections import deque
@@ -793,6 +794,7 @@ class AdbController:
         self.synced_devices: set[str] = set()
         self.prompted_unauth_serials: set[str] = set()
         self.last_reconnect_ts: float = 0.0
+        self._poll_lock = threading.Lock()
         self._init_multi_machine_adb_keys()
 
     def _init_multi_machine_adb_keys(self) -> None:
@@ -830,41 +832,58 @@ class AdbController:
             pass
 
     def run_adb(self, args: List[str], serial: Optional[str] = None, timeout: float = 8.0) -> Tuple[int, str, str]:
+        """
+        Execute an ADB command using temporary file handles instead of anonymous pipes so that if
+        adb.exe spawns a background daemon (fork-server) on Windows, inherited handles never block
+        Python's subprocess.communicate() after the client process exits.
+        """
         cmd = [self.adb_path]
         if serial:
             cmd.extend(["-s", serial])
         cmd.extend(args)
         try:
             env = os.environ.copy()
-            proc = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                **get_subprocess_kwargs(),
-            )
-            return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
-        except subprocess.TimeoutExpired:
-            return -1, "", "Command timed out"
+            with tempfile.TemporaryFile() as f_out, tempfile.TemporaryFile() as f_err:
+                proc = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=f_out,
+                    stderr=f_err,
+                    **get_subprocess_kwargs(),
+                )
+                try:
+                    rc = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return -1, "", "Command timed out"
+                f_out.seek(0)
+                f_err.seek(0)
+                out = f_out.read().decode("utf-8", errors="replace").strip()
+                err = f_err.read().decode("utf-8", errors="replace").strip()
+                return rc, out, err
         except Exception as exc:
             return -1, "", str(exc)
 
     def force_reconnect_unauthorized(self, serial: Optional[str] = None) -> str:
         """
-        Actively dispatch ADB RSA handshake and reconnect offline/unauthorized transports
-        so the connected phone immediately pops up or accepts the RSA key authorization.
+        Cleanly restart the ADB daemon with all ADB_VENDOR_KEYS loaded so Windows WinUSB / Samsung USB
+        endpoints re-enumerate cleanly and re-dispatch the RSA key authorization dialog to the phone
+        without dropping the USB transport.
         """
         self._init_multi_machine_adb_keys()
-        self.run_adb(["reconnect", "offline"], timeout=4.0)
-        if serial:
-            self.run_adb(["-s", serial, "reconnect"], timeout=4.0)
+        if os.name == "nt":
+            self.run_adb(["kill-server"], timeout=4.0)
+            self.run_adb(["start-server"], timeout=6.0)
         else:
-            self.run_adb(["reconnect"], timeout=4.0)
+            self.run_adb(["reconnect", "offline"], timeout=4.0)
+            if serial:
+                self.run_adb(["-s", serial, "reconnect"], timeout=4.0)
         self.last_reconnect_ts = time.time()
-        return "Dispatched RSA key handshake & ADB reconnect to all connected devices."
+        return "Dispatched RSA key handshake & clean USB bus re-enumeration to all connected devices."
 
     def sync_trusted_pubkeys_to_device(self, serial: str) -> None:
         """
@@ -899,78 +918,38 @@ class AdbController:
             pass
 
     def list_devices(self, auto_heal: bool = True) -> List[Dict[str, str]]:
-        code, out, _ = self.run_adb(["devices", "-l"], timeout=5.0)
-        devices: List[Dict[str, str]] = []
-        if code != 0 or not out:
+        with self._poll_lock:
+            code, out, _ = self.run_adb(["devices", "-l"], timeout=6.0)
+            devices: List[Dict[str, str]] = []
+            if code != 0 or not out:
+                return devices
+            for line in out.splitlines():
+                line = line.strip()
+                if not line or line.startswith("*") or line.lower().startswith("list of devices"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    serial = parts[0]
+                    state = parts[1]
+                    if state not in ("device", "unauthorized", "offline", "recovery", "sideload", "authorizing"):
+                        continue
+                    meta = {}
+                    for token in parts[2:]:
+                        if ":" in token:
+                            k, v = token.split(":", 1)
+                            meta[k] = v
+                    if state == "device":
+                        threading.Thread(target=self.sync_trusted_pubkeys_to_device, args=(serial,), daemon=True).start()
+                    devices.append(
+                        {
+                            "serial": serial,
+                            "state": state,
+                            "model": meta.get("model", "Android_Device"),
+                            "device": meta.get("device", "Unknown"),
+                            "transport_id": meta.get("transport_id", ""),
+                        }
+                    )
             return devices
-        has_unauth = False
-        for line in out.splitlines()[1:]:
-            line = line.strip()
-            if not line or line.startswith("*"):
-                continue
-            parts = line.split()
-            if len(parts) >= 2:
-                serial = parts[0]
-                state = parts[1]
-                meta = {}
-                for token in parts[2:]:
-                    if ":" in token:
-                        k, v = token.split(":", 1)
-                        meta[k] = v
-                if state in ("unauthorized", "offline"):
-                    has_unauth = True
-                elif state == "device":
-                    threading.Thread(target=self.sync_trusted_pubkeys_to_device, args=(serial,), daemon=True).start()
-                devices.append(
-                    {
-                        "serial": serial,
-                        "state": state,
-                        "model": meta.get("model", "Unknown"),
-                        "device": meta.get("device", "Unknown"),
-                        "transport_id": meta.get("transport_id", ""),
-                    }
-                )
-
-        # Trigger `adb reconnect offline` ONCE per newly plugged unauthorized/offline serial so we pop up
-        # the RSA dialog on the phone without ever resetting the USB transport while the user taps "Allow"
-        if auto_heal and has_unauth:
-            current_serials = {d["serial"] for d in devices}
-            self.prompted_unauth_serials.intersection_update(current_serials)
-            unprompted = [
-                d["serial"]
-                for d in devices
-                if d["state"] in ("unauthorized", "offline") and d["serial"] not in self.prompted_unauth_serials
-            ]
-            if unprompted:
-                for s in unprompted:
-                    self.prompted_unauth_serials.add(s)
-                self.last_reconnect_ts = time.time()
-                self.run_adb(["reconnect", "offline"], timeout=3.0)
-                time.sleep(0.9)
-                # Re-query device list immediately after the 0.9s USB re-enumeration so the dropdown never flickers empty
-                code2, out2, _ = self.run_adb(["devices", "-l"], timeout=5.0)
-                if code2 == 0 and out2:
-                    refreshed: List[Dict[str, str]] = []
-                    for line in out2.splitlines()[1:]:
-                        line = line.strip()
-                        if not line or line.startswith("*"):
-                            continue
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            meta = {t.split(":", 1)[0]: t.split(":", 1)[1] for t in parts[2:] if ":" in t}
-                            refreshed.append(
-                                {
-                                    "serial": parts[0],
-                                    "state": parts[1],
-                                    "model": meta.get("model", "Unknown"),
-                                    "device": meta.get("device", "Unknown"),
-                                    "transport_id": meta.get("transport_id", ""),
-                                }
-                            )
-                    if refreshed:
-                        return refreshed
-
-        return devices
 
     def send_keyevent(self, serial: str, keycode: str) -> bool:
         code, _, _ = self.run_adb(["shell", "input", "keyevent", str(keycode)], serial=serial, timeout=3.0)
